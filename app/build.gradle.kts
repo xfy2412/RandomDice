@@ -20,7 +20,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 压代码 + 删没被引用的资源。这个应用没有反射、没有 Room/序列化库，
+            // 唯一的雷是枚举常量名（settings.txt 按名字落盘），keep 规则见 proguard-rules.pro
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
