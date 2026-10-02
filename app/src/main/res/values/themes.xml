@@ -1,0 +1,7 @@
+<resources>
+    <!--
+      配色由 Compose 的 Material 3 主题（ui/theme/Theme.kt）负责，
+      这里只提供一个不带 ActionBar 的窗口主题，避免和 Compose 的 TopAppBar 打架。
+    -->
+    <style name="Theme.随机骰子" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

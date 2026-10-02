@@ -1,0 +1,4 @@
+<resources>
+    <!-- 夜间模式下的窗口主题，同样交给 Compose 的 M3 配色决定实际颜色。 -->
+    <style name="Theme.随机骰子" parent="android:Theme.Material.NoActionBar" />
+</resources>
