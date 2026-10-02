@@ -1,6 +1,7 @@
 package com.xfy.randomdice.ui
 
 import android.content.res.Configuration
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -8,26 +9,37 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -79,9 +91,27 @@ private val DIE_SIZE_MAX = 200.dp
 /** 下拉卡片里「内容区」的高度上限（卡片总高还要加 40dp 的拖动条底边）。 */
 private val CARD_CONTENT_MAX_HEIGHT = 180.dp
 
+/** 摇骰按钮高度。藏起来时要留同样高的占位，见下面按钮那段的说明。 */
+private val ROLL_BUTTON_HEIGHT = 56.dp
+
+/**
+ * 底部那一格（数量滑杆 ↔ 记录行）的固定高度。
+ *
+ * 两种内容自然高度不同（滑杆行约 48dp、输入框行 56dp），不固定的话切换时这一格会换高，
+ * 把上面的「摇出 X 点」和骰子顶上顶下 —— 固定之后，上面的一切都是常量。
+ */
+private val BOTTOM_SLOT_HEIGHT = 56.dp
+
+/** 底部那一格当前显示什么。三态共用同一格固定高度，所以切换时上面的元素一律不动。 */
+private enum class BottomSlot { Selector, Rolling, Prompt }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DiceScreen(modifier: Modifier = Modifier) {
+fun DiceScreen(
+    onOpenDecisions: () -> Unit,
+    onSaveDecision: (results: List<Int>, decision: String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     var diceCount by rememberSaveable { mutableIntStateOf(1) }
     var value by rememberSaveable { mutableIntStateOf(1) }
     var rollCount by rememberSaveable { mutableIntStateOf(0) }
@@ -93,6 +123,8 @@ fun DiceScreen(modifier: Modifier = Modifier) {
     var tumbling by remember { mutableStateOf(false) }
     // 进度条「当前段」的填充比例（停留期间从 0 推到 1）
     var currentFill by remember { mutableFloatStateOf(0f) }
+    // 底部那行「记录这次的决定」是否露出（完整摇完一轮后出现，可自动缩回）
+    var promptVisible by remember { mutableStateOf(false) }
     // 骰子所在区域的实测尺寸：宽度用来算滑动距离，高度用来把骰子缩到放得下
     var stageWidthPx by remember { mutableIntStateOf(0) }
     var stageHeightPx by remember { mutableIntStateOf(0) }
@@ -108,6 +140,15 @@ fun DiceScreen(modifier: Modifier = Modifier) {
     val slideFraction = remember { Animatable(0f) }
     var sessionJob by remember { mutableStateOf<Job?>(null) }
 
+    // 从记录页返回时这一页会被重建：value 是 rememberSaveable 恢复回来的，
+    // 但姿态是 remember 的、会归零 —— 不重新对齐就会出现「画着 1 点、写着 4 点」。
+    LaunchedEffect(Unit) {
+        val (x, y, z) = targetRotationFor(value, 0f, 0f, 0f, extraTurns = 0)
+        rotationX.snapTo(x % 360f)
+        rotationY.snapTo(y % 360f)
+        rotationZ.snapTo(z % 360f)
+    }
+
     // 卡片展开会把舞台挤矮，骰子跟着缩小（还没测量时先按上限，避免首帧闪一下）
     val dieSize by animateDpAsState(
         targetValue = if (stageHeightPx == 0) {
@@ -117,6 +158,13 @@ fun DiceScreen(modifier: Modifier = Modifier) {
         },
         animationSpec = tween(durationMillis = 220),
         label = "dieSize",
+    )
+
+    // 记录行露出时摇骰按钮淡出；位置照留（原因见按钮那段的注释）
+    val rollButtonAlpha by animateFloatAsState(
+        targetValue = if (promptVisible) 0f else 1f,
+        animationSpec = tween(durationMillis = 220),
+        label = "rollButtonAlpha",
     )
 
     /** 摇一次：跑完翻滚动画并把结果记下来。会挂起直到动画结束。 */
@@ -164,12 +212,17 @@ fun DiceScreen(modifier: Modifier = Modifier) {
         sessionRolled = 0
         roundResults = emptyList()
         roundTotal = count
+        promptVisible = false // 再摇一次就把记录行收起来
         sessionJob = scope.launch {
+            var completed = false
             try {
                 repeat(count) { index ->
+                    // 翻滚期间这一段保持空着，由轨道呼吸负责「正在摇」的观感
+                    // （不用 indeterminate 形态：不确定态与确定态是两个不同重载，
+                    //  一切换 Compose 就重建节点、扫动动画当场消失 —— 那就是那一闪）
                     rollOne()
-                    // 「停留」= 把当前段按停留时长填满：填满的瞬间就是该切换的瞬间，
-                    // 于是进度条自己成了「还有多久」的读数（步进插值，不再有阶跃）
+                    // 「停留」= 按停留时长从 0 填到满：填满的瞬间就是该切换的瞬间，
+                    // 于是进度条自己成了「还有多久」的读数（全程单调连续，无阶跃）
                     animate(
                         initialValue = 0f,
                         targetValue = 1f,
@@ -192,9 +245,12 @@ fun DiceScreen(modifier: Modifier = Modifier) {
                         }
                     }
                 }
+                completed = true
             } finally {
                 tumbling = false
                 sessionRunning = false
+                // 只有完整摇完一轮才提示记录；中途停止不弹（那不算一次完整的决定）
+                if (completed) promptVisible = true
             }
         }
     }
@@ -213,6 +269,14 @@ fun DiceScreen(modifier: Modifier = Modifier) {
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(text = "随机骰子") },
+                navigationIcon = {
+                    IconButton(onClick = onOpenDecisions) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.List,
+                            contentDescription = "决策记录",
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainer,
                 ),
@@ -225,10 +289,12 @@ fun DiceScreen(modifier: Modifier = Modifier) {
                 .padding(innerPadding),
         ) {
             // 顶部进度条：分段无缝 + 刻度线。
-            // 空闲时显示的是「本轮准备摇 N 个」的预览 —— 所以不会有忽现忽隐的跳变
+            // 摇完（或中途停止）后**保留那一轮的状态** —— 摇满就停在满格；
+            // 只有还没摇过、或数量被改动过时，才回到「准备摇 N 个」的空预览。
+            val keepsLastRound = !sessionRunning && roundTotal > 0 && diceCount == roundTotal
             RollProgressBar(
-                totalCount = if (sessionRunning) roundTotal else diceCount,
-                completedCount = if (sessionRunning) sessionRolled else 0,
+                totalCount = if (sessionRunning || keepsLastRound) roundTotal else diceCount,
+                completedCount = if (sessionRunning || keepsLastRound) sessionRolled else 0,
                 currentFill = currentFill,
                 rolling = tumbling,
             )
@@ -292,23 +358,63 @@ fun DiceScreen(modifier: Modifier = Modifier) {
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                if (sessionRunning) {
-                    // 会话中把数量选择换成一个占位，避免误触
-                    Spacer(modifier = Modifier.height(48.dp))
-                } else {
-                    CountSelector(
-                        diceCount = diceCount,
-                        onDiceCountChange = { diceCount = it },
-                    )
+                // 底部这一格：三态（数量滑杆 / 摇动中留空 / 记录行）共用**同一格固定高度**，
+                // 只在格子内部交叉淡化。
+                // 之前「摇动中」走的是另一个 48dp 的占位分支，比这格矮 8dp —— 于是开摇时上面的
+                // 「摇出 X 点」被顶下去、记录行出现时又跳回来。三态共用一个高度就不会再发生。
+                val bottomSlot = when {
+                    sessionRunning -> BottomSlot.Rolling
+                    promptVisible -> BottomSlot.Prompt
+                    else -> BottomSlot.Selector
+                }
+                AnimatedContent(
+                    targetState = bottomSlot,
+                    modifier = Modifier.height(BOTTOM_SLOT_HEIGHT),
+                    transitionSpec = {
+                        fadeIn(tween(durationMillis = 200)) togetherWith fadeOut(tween(durationMillis = 200))
+                    },
+                    label = "bottomSlot",
+                ) { slot ->
+                    when (slot) {
+                        BottomSlot.Selector -> CountSelector(
+                            diceCount = diceCount,
+                            onDiceCountChange = { diceCount = it },
+                        )
+
+                        // 摇动中这一格留空，避免误触数量滑杆
+                        BottomSlot.Rolling -> Box(modifier = Modifier.fillMaxSize())
+
+                        BottomSlot.Prompt -> DecisionPrompt(
+                            onSave = { text ->
+                                onSaveDecision(roundResults, text)
+                                promptVisible = false
+                            },
+                            onIgnore = { promptVisible = false },
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                // 记录行露出期间把摇骰按钮藏起来：它一按就开新一轮、会清空本轮结果，
+                // 而输入法正好挡在这一带，很容易误触；记完或忽略后它自己淡回来。
+                //
+                // ⚠️ 用「原地淡出 + 禁用」，不是把它从布局里拿掉：一拿掉，位置就让给了下面的
+                // 间距，记录行顺势往下掉、正好落进键盘区域（上一轮之所以没事，正是因为按钮还
+                // 占着位置、把记录行顶在键盘上方）。位置不动，就永远不会被键盘吃到。
                 Button(
                     onClick = { if (sessionRunning) stopSession() else startSession() },
+                    enabled = !promptVisible,
+                    // 隐藏期间保持与正常态相同的配色，只靠透明度淡出。
+                    // 若用 M3 默认的禁用配色，会瞬间变成"禁用灰"——看起来就是"啪"地一下没了。
+                    colors = ButtonDefaults.buttonColors(
+                        disabledContainerColor = MaterialTheme.colorScheme.primary,
+                        disabledContentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(ROLL_BUTTON_HEIGHT)
+                        .graphicsLayer { alpha = rollButtonAlpha },
                 ) {
                     Text(
                         text = when {
@@ -334,7 +440,9 @@ private fun CountSelector(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .fillMaxHeight(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -364,7 +472,7 @@ private fun CountSelector(
 @Composable
 private fun DiceScreenPreview() {
     RandomDiceTheme(dynamicColor = false) {
-        DiceScreen()
+        DiceScreen(onOpenDecisions = {}, onSaveDecision = { _, _ -> })
     }
 }
 
@@ -372,6 +480,6 @@ private fun DiceScreenPreview() {
 @Composable
 private fun DiceScreenDarkPreview() {
     RandomDiceTheme(darkTheme = true, dynamicColor = false) {
-        DiceScreen()
+        DiceScreen(onOpenDecisions = {}, onSaveDecision = { _, _ -> })
     }
 }

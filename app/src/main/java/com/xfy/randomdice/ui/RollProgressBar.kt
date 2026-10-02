@@ -3,6 +3,7 @@ package com.xfy.randomdice.ui
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -40,11 +41,17 @@ private const val BREATH_MIN_ALPHA = 0.45f
  * 本轮进度条：**分段无缝 + 刻度线**。
  *
  * - 段数 = 本轮骰子数（空闲时按待摇数量预览，所以不会"忽现忽隐"）。
- * - 段与段之间**不留缝**（`strokeCap = Butt`、`gapSize = 0`、去掉末端停止点），
- *   边界只用一条背景色的细刻度线"切"出来 —— 所以填充看起来是连续的一条。
+ * - 每段用 `strokeCap = Round`（圆角端点）。M3 内部会把端点按半个笔宽内缩
+ *   （见 1.3.1 源码 `drawLinearIndicator` 里的 `coerceRange`），
+ *   所以相邻两段的圆角**恰好相接、不会互相盖住**；相接处只有一个尖角。
+ * - 因此段边界仍用一条背景色的细刻度线"切"出来 —— 让"这是一段"读得出来的是它。
  * - 已完成段：满格。
- * - 当前段：正在翻滚时用**原生 indeterminate 形态**（扫动）+ 轨道亮暗呼吸；
- *   落定后由调用方按停留时长把 [currentFill] 从 0 推到 1（步进插值），填满即切换。
+ * - 当前段：只用一个**确定态**组件，进度值由调用方连续驱动
+ *   （翻滚期间保持空、靠轨道亮暗呼吸表示"正在摇"；落定后按停留时长填满）。
+ *   ⚠️ 刻意**不用 indeterminate 重载**：不确定态与确定态是两个不同的可组合函数，
+ *   一翻标志位 Compose 就会重建节点、扫动动画当场消失 —— 肉眼就是"闪一下"，
+ *   而且换任何版本（含 Expressive 波浪条）只要还是两个重载就一样会闪。
+ *   只用一个确定态组件、只推一个单调递增的值，就不存在可闪的瞬间。
  * - 未开始段：只有轨道。
  *
  * 渲染全部是 M3 原生组件；自己画的只有那几条刻度线。
@@ -74,6 +81,12 @@ fun RollProgressBar(
         ),
         label = "breathAlpha",
     )
+    // 0 = 不在摇（轨道回到常态）、1 = 正在摇（轨道跟着呼吸）。用动画过渡，避免突跳
+    val rollingFactor by animateFloatAsState(
+        targetValue = if (rolling) 1f else 0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "rollingFactor",
+    )
 
     Box(
         modifier = modifier
@@ -85,42 +98,31 @@ fun RollProgressBar(
         Row(modifier = Modifier.fillMaxSize()) {
             repeat(totalCount) { index ->
                 val isCurrent = index == completedCount
-                val segmentTrackColor = if (isCurrent && rolling) {
-                    trackColor.copy(alpha = trackColor.alpha * breath)
+                val segmentTrackColor = if (isCurrent) {
+                    // 呼吸只属于"正在摇"，但用 rollingFactor 平滑淡入淡出 ——
+                    // 否则落定那一刻若正好在呼吸低点，轨道也会跟着闪一下
+                    trackColor.copy(alpha = trackColor.alpha * (1f - (1f - breath) * rollingFactor))
                 } else {
                     trackColor
                 }
 
-                if (isCurrent && rolling) {
-                    // 正在摇：原生不确定形态 —— 语义上就是"在动、还没定"
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        color = indicatorColor,
-                        trackColor = segmentTrackColor,
-                        strokeCap = StrokeCap.Butt,
-                        gapSize = 0.dp,
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        progress = {
-                            when {
-                                index < completedCount -> 1f
-                                isCurrent -> currentFill
-                                else -> 0f
-                            }
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        color = indicatorColor,
-                        trackColor = segmentTrackColor,
-                        strokeCap = StrokeCap.Butt,
-                        gapSize = 0.dp,
-                        drawStopIndicator = {},
-                    )
-                }
+                LinearProgressIndicator(
+                    progress = {
+                        when {
+                            index < completedCount -> 1f
+                            isCurrent -> currentFill
+                            else -> 0f
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    color = indicatorColor,
+                    trackColor = segmentTrackColor,
+                    strokeCap = StrokeCap.Round,
+                    gapSize = 0.dp,
+                    drawStopIndicator = {},
+                )
             }
         }
 

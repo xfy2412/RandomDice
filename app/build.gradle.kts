@@ -49,6 +49,8 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.foundation)
     implementation(libs.androidx.material3)
+    // 图标（对勾 / 返回 / 列表）：material3 的 api 依赖，版本由 BOM 统一
+    implementation(libs.androidx.material.icons.core)
 
     testImplementation(libs.junit)
 

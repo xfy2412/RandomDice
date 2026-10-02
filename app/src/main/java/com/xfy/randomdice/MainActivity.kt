@@ -4,7 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import com.xfy.randomdice.ui.DiceScreen
+import com.xfy.randomdice.ui.RandomDiceApp
 import com.xfy.randomdice.ui.theme.RandomDiceTheme
 
 class MainActivity : ComponentActivity() {
@@ -13,7 +13,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             RandomDiceTheme {
-                DiceScreen()
+                RandomDiceApp()
             }
         }
     }
