@@ -16,8 +16,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
-import com.xfy.randomdice.data.DecisionRecord
 import com.xfy.randomdice.data.DecisionStore
+import com.xfy.randomdice.data.SettingsStore
 
 /** 页面切换动画时长。 */
 private const val SCREEN_TRANSITION_MS = 320
@@ -37,7 +37,11 @@ private const val SCREEN_TRANSITION_MS = 320
 fun RandomDiceApp() {
     val context = LocalContext.current
     val store = remember(context) { DecisionStore.from(context) }
+    val settingsStore = remember(context) { SettingsStore.from(context) }
     var records by remember(store) { mutableStateOf(store.load()) }
+    // 设置也搁在 MutableState 里，更新一律读 .value 再写回：摇一轮会连着写十几次，
+    // 回调里若捕获的是某一帧的旧值，改过的规则会被覆盖回去。
+    val settings = remember(settingsStore) { mutableStateOf(settingsStore.load()) }
     var showDecisions by rememberSaveable { mutableStateOf(false) }
     val screenStates = rememberSaveableStateHolder()
 
@@ -77,15 +81,20 @@ fun RandomDiceApp() {
                 )
             } else {
                 DiceScreen(
+                    settings = settings.value,
+                    onTotalRollsChange = { total ->
+                        val updated = settings.value.copy(totalRolls = total)
+                        settings.value = updated
+                        settingsStore.save(updated)
+                    },
+                    onRuleChange = { rule ->
+                        val updated = settings.value.copy(rule = rule)
+                        settings.value = updated
+                        settingsStore.save(updated)
+                    },
                     onOpenDecisions = { showDecisions = true },
-                    onSaveDecision = { results, decision ->
-                        val updated = listOf(
-                            DecisionRecord(
-                                timestampMillis = System.currentTimeMillis(),
-                                results = results,
-                                decision = decision,
-                            ),
-                        ) + records
+                    onSaveDecision = { record ->
+                        val updated = listOf(record) + records
                         records = updated
                         store.save(updated)
                     },

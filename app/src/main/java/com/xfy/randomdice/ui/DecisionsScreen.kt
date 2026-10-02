@@ -136,10 +136,42 @@ private fun DecisionRecordCard(
                 Spacer(modifier = Modifier.height(10.dp))
             }
 
+            // 上面是「要决定的事」（题目），下面那行才是这次定下来的**结果**。
+            // 老记录没有题目字段，那就直接拿结果当标题，读起来跟从前一样。
+            val subject = record.subject.ifBlank { record.decision }
             Text(
-                text = record.decision,
+                text = subject,
                 style = MaterialTheme.typography.bodyLarge,
             )
+
+            if (record.decision.isNotEmpty() && record.decision != subject) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "结果：${record.decision}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            // 规则判了「执行」，你最后却写了自己的结果 —— 这种事值得留个痕。
+            // 措辞避开「判决」二字，免得读成"这次的结果就是它"。
+            if (record.ruling.isNotEmpty() && record.ruling != record.decision) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "规则原本判：${record.ruling}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (record.ruleSummary.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = record.ruleSummary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

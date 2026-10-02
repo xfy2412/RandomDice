@@ -2,6 +2,7 @@ package com.xfy.randomdice.ui
 
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -11,9 +12,12 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,8 +29,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -50,6 +56,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -57,6 +64,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.xfy.randomdice.data.DecisionRecord
+import com.xfy.randomdice.data.DiceSettings
+import com.xfy.randomdice.dice.JudgmentRule
+import com.xfy.randomdice.dice.judge
 import com.xfy.randomdice.dice.targetRotationFor
 import com.xfy.randomdice.ui.theme.RandomDiceTheme
 import kotlinx.coroutines.Job
@@ -108,13 +119,17 @@ private enum class BottomSlot { Selector, Rolling, Prompt }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiceScreen(
+    settings: DiceSettings,
+    onTotalRollsChange: (Int) -> Unit,
+    onRuleChange: (JudgmentRule) -> Unit,
     onOpenDecisions: () -> Unit,
-    onSaveDecision: (results: List<Int>, decision: String) -> Unit,
+    onSaveDecision: (DecisionRecord) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var diceCount by rememberSaveable { mutableIntStateOf(1) }
     var value by rememberSaveable { mutableIntStateOf(1) }
-    var rollCount by rememberSaveable { mutableIntStateOf(0) }
+    // 累计摇过多少颗：本地值负责「一摇就变」，同时写回设置，跨启动接着累加
+    var totalRolls by rememberSaveable { mutableIntStateOf(settings.totalRolls) }
     var roundResults by rememberSaveable { mutableStateOf(emptyList<Int>()) }
     // 本轮打算摇几个：按下按钮时定下来，之后拖滑杆不影响卡片上的分母
     var roundTotal by rememberSaveable { mutableIntStateOf(0) }
@@ -125,6 +140,14 @@ fun DiceScreen(
     var currentFill by remember { mutableFloatStateOf(0f) }
     // 底部那行「记录这次的决定」是否露出（完整摇完一轮后出现，可自动缩回）
     var promptVisible by remember { mutableStateOf(false) }
+    // 终局那行「本次决策」的临时选择：换过的结果项 / 是否用自己写的 / 自己写的那句话
+    var chosenOutcome by rememberSaveable { mutableStateOf<String?>(null) }
+    var customSelected by rememberSaveable { mutableStateOf(false) }
+    var customText by rememberSaveable { mutableStateOf("") }
+    // 下面那格：这次**要决定的事情**（题目）。结果在上面的行里，两者互不覆盖，都会进记录。
+    var decisionText by rememberSaveable { mutableStateOf("") }
+    // 判决规则编辑弹层
+    var editorOpen by remember { mutableStateOf(false) }
     // 骰子所在区域的实测尺寸：宽度用来算滑动距离，高度用来把骰子缩到放得下
     var stageWidthPx by remember { mutableIntStateOf(0) }
     var stageHeightPx by remember { mutableIntStateOf(0) }
@@ -167,6 +190,33 @@ fun DiceScreen(
         label = "rollButtonAlpha",
     )
 
+    // 这一轮的判决（没配规则、或还没摇出点数时为 null）
+    val judgment = settings.rule.judge(roundResults)
+    // 本次掷骰的结论：手动换过的结果项 > 规则判决。
+    // 换过的那一项必须仍在这套规则里 —— 规则可能刚被改过（比如「平手」没了）。
+    val outcomeChoice = chosenOutcome?.takeIf { it in settings.rule.outcomes } ?: judgment?.label.orEmpty()
+    // 选中「自定义」时以自己写的为准；还没写就先按结论算
+    val rowChoice = if (customSelected) customText.trim().ifEmpty { outcomeChoice } else outcomeChoice
+    // 记录里的「结果」和「要决定的事」：有规则时结果听行里那格、下面那格是题目（谁都不会被丢），
+    // 没规则时下面那格写的就是结果。见 resolveDecisionAndSubject 的注释（这里踩过静默丢字的坑）。
+    val (decision, subject) = resolveDecisionAndSubject(
+        rowActive = judgment != null,
+        rowChoice = rowChoice,
+        bottomText = decisionText,
+    )
+    val canSave = decision.isNotEmpty() || subject.isNotEmpty()
+    // 记录里的「判决」始终是规则自己给的那句 —— 你改了主意也留个痕
+    val ruling = judgment?.label.orEmpty()
+
+    /** 收起记录行，并把「本次决策」的临时选择清干净（下一轮重新按规则判）。 */
+    fun closePrompt() {
+        promptVisible = false
+        decisionText = ""
+        customText = ""
+        customSelected = false
+        chosenOutcome = null
+    }
+
     /** 摇一次：跑完翻滚动画并把结果记下来。会挂起直到动画结束。 */
     suspend fun rollOne() {
         // 先定结果，再反解出「让这一面朝上」的目标姿态：
@@ -200,7 +250,8 @@ fun DiceScreen(
         rotationZ.snapTo(endZ % 360f)
 
         value = result
-        rollCount += 1
+        totalRolls += 1
+        onTotalRollsChange(totalRolls)
         roundResults = roundResults + result
         // sessionRolled（进度条「已完成段数」）不在这里 +1 —— 要等停留填满之后，见 startSession
     }
@@ -212,7 +263,7 @@ fun DiceScreen(
         sessionRolled = 0
         roundResults = emptyList()
         roundTotal = count
-        promptVisible = false // 再摇一次就把记录行收起来
+        closePrompt() // 再摇一次就把记录行收起来
         sessionJob = scope.launch {
             var completed = false
             try {
@@ -344,19 +395,82 @@ fun DiceScreen(
                     fontWeight = FontWeight.SemiBold,
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
-                Text(
-                    text = when {
-                        sessionRunning -> "第 ${(sessionRolled + 1).coerceAtMost(diceCount)} 个 / 共 $diceCount 个"
-                        rollCount == 0 -> "让骰子替你决定"
-                        else -> "已经摇了 $rollCount 次"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                // 这一行是「摇过多少次」，同时也是判决规则的入口：点一下换规则。
+                // 摘要跟在次数后面，免得要点开才知道现在按什么判。
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClickLabel = "设置判决规则") { editorOpen = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = when {
+                            sessionRunning -> "第 ${(sessionRolled + 1).coerceAtMost(diceCount)} 个 / 共 $diceCount 个"
+                            totalRolls == 0 -> "让骰子替你决定"
+                            else -> "已经摇了 $totalRolls 次"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (settings.rule.shortSummary.isNotEmpty()) {
+                        Text(
+                            text = " · ${settings.rule.shortSummary}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                // 终局那行「本次决策」：只在有规则、且这一轮完整摇完之后出现。
+                // 出现时把骰子舞台挤矮一点，骰子跟着缩 —— 沿用抽屉展开时那套自适应，不跳。
+                val activeJudgment = judgment
+                AnimatedVisibility(
+                    visible = promptVisible && activeJudgment != null,
+                    enter = fadeIn(tween(durationMillis = 200)) + expandVertically(tween(durationMillis = 220)),
+                    exit = fadeOut(tween(durationMillis = 160)) + shrinkVertically(tween(durationMillis = 200)),
+                ) {
+                    if (activeJudgment != null) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            DecisionChoiceRow(
+                                rule = settings.rule,
+                                judgment = activeJudgment,
+                                chosen = outcomeChoice,
+                                customSelected = customSelected,
+                                customText = customText,
+                                // 一打字就算选中「自定义」—— 字都写了，结论当然听你的
+                                onCustomTextChange = {
+                                    customText = it
+                                    customSelected = true
+                                },
+                                // 已经有字的时候再点回输入框（获得焦点）= 重新选中自定义，不用重打
+                                onSelectCustom = { customSelected = true },
+                                // ✕：退出自定义，回到「按规则判」，顺手把那句话清掉
+                                onClearCustom = {
+                                    customSelected = false
+                                    customText = ""
+                                },
+                                // 换项就退出自定义 —— 两边互斥，否则换了看不出效果
+                                onChooseOutcome = {
+                                    chosenOutcome = it
+                                    customSelected = false
+                                },
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // 底部这一格：三态（数量滑杆 / 摇动中留空 / 记录行）共用**同一格固定高度**，
                 // 只在格子内部交叉淡化。
@@ -385,11 +499,24 @@ fun DiceScreen(
                         BottomSlot.Rolling -> Box(modifier = Modifier.fillMaxSize())
 
                         BottomSlot.Prompt -> DecisionPrompt(
-                            onSave = { text ->
-                                onSaveDecision(roundResults, text)
-                                promptVisible = false
+                            value = decisionText,
+                            onValueChange = { decisionText = it },
+                            canSave = canSave,
+                            onSave = {
+                                onSaveDecision(
+                                    DecisionRecord(
+                                        timestampMillis = System.currentTimeMillis(),
+                                        results = roundResults,
+                                        decision = decision,
+                                        ruling = ruling,
+                                        // 规则的快照：以后改了规则，这条记录也说得清当时是怎么判的
+                                        ruleSummary = if (judgment == null) "" else settings.rule.summary,
+                                        subject = subject,
+                                    ),
+                                )
+                                closePrompt()
                             },
-                            onIgnore = { promptVisible = false },
+                            onIgnore = { closePrompt() },
                         )
                     }
                 }
@@ -429,6 +556,15 @@ fun DiceScreen(
                 Spacer(modifier = Modifier.height(24.dp))
             }
         }
+    }
+
+    // 判决规则编辑：点「已经摇了 N 次」那行打开，改一下立刻生效
+    if (editorOpen) {
+        RuleEditorSheet(
+            rule = settings.rule,
+            onRuleChange = onRuleChange,
+            onDismiss = { editorOpen = false },
+        )
     }
 }
 
@@ -472,7 +608,13 @@ private fun CountSelector(
 @Composable
 private fun DiceScreenPreview() {
     RandomDiceTheme(dynamicColor = false) {
-        DiceScreen(onOpenDecisions = {}, onSaveDecision = { _, _ -> })
+        DiceScreen(
+            settings = DiceSettings(),
+            onTotalRollsChange = {},
+            onRuleChange = {},
+            onOpenDecisions = {},
+            onSaveDecision = {},
+        )
     }
 }
 
@@ -480,6 +622,12 @@ private fun DiceScreenPreview() {
 @Composable
 private fun DiceScreenDarkPreview() {
     RandomDiceTheme(darkTheme = true, dynamicColor = false) {
-        DiceScreen(onOpenDecisions = {}, onSaveDecision = { _, _ -> })
+        DiceScreen(
+            settings = DiceSettings(),
+            onTotalRollsChange = {},
+            onRuleChange = {},
+            onOpenDecisions = {},
+            onSaveDecision = {},
+        )
     }
 }
