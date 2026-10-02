@@ -20,6 +20,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -61,12 +63,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.xfy.randomdice.audio.RollSoundPlayer
 import com.xfy.randomdice.audio.SoundTimbre
@@ -153,7 +157,11 @@ fun DiceScreen(
     // 进度条「当前段」的填充比例（停留期间从 0 推到 1）
     var currentFill by remember { mutableFloatStateOf(0f) }
     // 底部那行「记录这次的决定」是否露出（完整摇完一轮后出现，可自动缩回）
-    var promptVisible by remember { mutableStateOf(false) }
+    //
+    // ⚠️ 必须是 rememberSaveable：这一页在切到「决策记录」时会离开组合，remember 不保存，
+    // 回来就变回 false —— 记录行和「本次决策」行整块消失，看着就像"未记录的决策被吃掉了"
+    // （其实 customText / decisionText 这些 saveable 的东西都还在，只是行没了）。
+    var promptVisible by rememberSaveable { mutableStateOf(false) }
     // 终局那行「本次决策」的临时选择：换过的结果项 / 是否用自己写的 / 自己写的那句话
     var chosenOutcome by rememberSaveable { mutableStateOf<String?>(null) }
     var customSelected by rememberSaveable { mutableStateOf(false) }
@@ -180,6 +188,8 @@ fun DiceScreen(
     }
     // 右下角工具托盘（⋮）的展开状态
     var trayExpanded by rememberSaveable { mutableStateOf(false) }
+    // 横屏竖向空间很紧：固定件要换一套紧凑排法（见下面的 landscape 分支）
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val scope = rememberCoroutineScope()
     // 骰子姿态（绕 Z → 绕 X → 绕 Y，单位度）。全 0 时朝上的是「1」，
     // 与 value 的初值一致 —— 这条不变量由 DiceGeometryTest 守着。
@@ -411,26 +421,32 @@ fun DiceScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text(text = "随机骰子") },
-                navigationIcon = {
-                    IconButton(onClick = onOpenDecisions) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.List,
-                            contentDescription = "决策记录",
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ),
-            )
+            // 横屏竖向只有 380 多 dp，顶栏光标题就吃掉 64dp —— 直接不要它，
+            // 「决策记录」的入口挪到状态行里（见下面的 landscape 分支）。
+            if (!landscape) {
+                CenterAlignedTopAppBar(
+                    title = { Text(text = "随机骰子") },
+                    navigationIcon = {
+                        IconButton(onClick = onOpenDecisions) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.List,
+                                contentDescription = "决策记录",
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    ),
+                )
+            }
         },
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                // 没有顶栏时状态栏那一块得自己让出来（edge-to-edge 下内容会钻进去）
+                .then(if (landscape) Modifier.statusBarsPadding() else Modifier),
         ) {
             // 顶部进度条：分段无缝 + 刻度线。
             // 摇完（或中途停止）后**保留那一轮的状态** —— 摇满就停在满格；
@@ -443,103 +459,110 @@ fun DiceScreen(
                 rolling = tumbling,
             )
 
-            // 下拉条 + 本轮点数卡片（就在进度条下面）
-            RoundResultsCard(
-                results = roundResults,
-                totalCount = roundTotal,
-                maxContentHeight = CARD_CONTENT_MAX_HEIGHT,
-            )
-
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .onSizeChanged {
-                            stageWidthPx = it.width
-                            stageHeightPx = it.height
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Dice3D(
-                        rotXDegrees = { rotationX.value },
-                        rotYDegrees = { rotationY.value },
-                        rotZDegrees = { rotationZ.value },
-                        rolling = tumbling,
-                        modifier = Modifier
-                            .size(dieSize)
-                            .graphicsLayer {
-                                // 滑出距离：让骰子中心越过屏幕边缘（半个可用宽度 + 一个骰子尺寸）
-                                val travel = stageWidthPx / 2f + dieSize.toPx()
-                                translationX = travel * slideFraction.value
-                                alpha = (1f - abs(slideFraction.value)).coerceIn(0f, 1f)
-                            },
-                    )
-
-                    // 右下角工具托盘：⋮ 点一下向左展开（摇一摇 / 震动 / 音效）。
-                    // 摇动中、有待记录的决定时整盘不可点。
-                    ToolTray(
-                        expanded = trayExpanded,
-                        onExpandedChange = { trayExpanded = it },
-                        enabled = shakeAvailable,
-                        shakeEnabled = settings.shakeEnabled,
-                        onShakeEnabledChange = onShakeEnabledChange,
-                        vibrationEnabled = settings.vibrationEnabled,
-                        onVibrationEnabledChange = onVibrationEnabledChange,
-                        timbre = settings.timbre,
-                        onTimbreChange = onTimbreChange,
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(4.dp),
-                    )
-                }
-
-                Text(
-                    text = "摇出 $value 点",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold,
+            // 下拉条 + 本轮点数卡片（就在进度条下面）。横屏时它换成左侧那张「向右抽」的抽屉，
+            // 所以这里只在竖屏出现。
+            if (!landscape) {
+                RoundResultsCard(
+                    results = roundResults,
+                    totalCount = roundTotal,
+                    maxContentHeight = CARD_CONTENT_MAX_HEIGHT,
                 )
+            }
 
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // 这一行是「摇过多少次」，同时也是判决规则的入口：点一下换规则。
-                // 摘要跟在次数后面，免得要点开才知道现在按什么判。
-                Row(
+            // 托盘（⋮）：竖屏在舞台右下角，横屏挪到右上角
+            val traySlot: @Composable BoxScope.() -> Unit = {
+                ToolTray(
+                    expanded = trayExpanded,
+                    onExpandedChange = { trayExpanded = it },
+                    enabled = shakeAvailable,
+                    shakeEnabled = settings.shakeEnabled,
+                    onShakeEnabledChange = onShakeEnabledChange,
+                    vibrationEnabled = settings.vibrationEnabled,
+                    onVibrationEnabledChange = onVibrationEnabledChange,
+                    timbre = settings.timbre,
+                    onTimbreChange = onTimbreChange,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(onClickLabel = "设置判决规则") { editorOpen = true }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = when {
-                            sessionRunning -> "第 ${(sessionRolled + 1).coerceAtMost(diceCount)} 个 / 共 $diceCount 个"
-                            totalRolls == 0 -> "让骰子替你决定"
-                            else -> "已经摇了 $totalRolls 次"
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (settings.rule.shortSummary.isNotEmpty()) {
-                        Text(
-                            text = " · ${settings.rule.shortSummary}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        .align(if (landscape) Alignment.TopEnd else Alignment.BottomEnd)
+                        .padding(4.dp),
+                )
+            }
+            val stage: @Composable (Modifier) -> Unit = { stageModifier ->
+                DiceStage(
+                    dieSize = dieSize,
+                    rotX = { rotationX.value },
+                    rotY = { rotationY.value },
+                    rotZ = { rotationZ.value },
+                    tumbling = tumbling,
+                    slideFraction = slideFraction.value,
+                    // 滑出距离：让骰子中心越过舞台边缘（半个可用宽度 + 一个骰子尺寸）
+                    travelPx = stageWidthPx / 2f + with(density) { dieSize.toPx() },
+                    onStageSize = { width, height ->
+                        stageWidthPx = width
+                        stageHeightPx = height
+                    },
+                    tray = traySlot,
+                    modifier = stageModifier,
+                )
+            }
+
+            // 横屏就是左右分栏：左栏舞台（侧抽屉 + 骰子 + 右上角托盘），右栏还是下面那堆控制件，
+            // 仍然从上到下纵向排列。竖屏时右栏就是整屏，舞台压在控制件上方 —— 同一份内容，只换排法。
+            Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (landscape) {
+                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        stage(Modifier.fillMaxSize())
+                        // 左侧「本轮点数」：竖把手贴左缘，向右抽出来
+                        RoundResultsSidePanel(
+                            results = roundResults,
+                            totalCount = roundTotal,
+                            modifier = Modifier.align(Alignment.CenterStart),
                         )
                     }
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(14.dp),
-                    )
                 }
+
+                // ⚠️ 横屏时不能给这一列 fillMaxSize：在 Row 里它会吃掉整行宽度，
+                // 左边 weight(1f) 的舞台就被挤成 0 宽（骰子和侧抽屉一起消失）。
+                val controlsWidth = if (landscape) {
+                    Modifier.width(340.dp).fillMaxHeight()
+                } else {
+                    Modifier.fillMaxSize()
+                }
+                Column(
+                    modifier = controlsWidth.padding(horizontal = if (landscape) 12.dp else 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    // 竖屏：舞台在上面，占满剩下的高度
+                    if (!landscape) {
+                        stage(Modifier.weight(1f).fillMaxWidth())
+                    }
+
+                // 右栏只有 340dp：横屏时「摇出 X 点」单独一行，次数那行照旧另起一行（纵向排列），
+                // 只是把记录入口（没有顶栏了）挪到「摇出 X 点」旁边 —— 合成一行会把规则摘要挤到换行。
+                if (landscape) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onOpenDecisions) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.List,
+                                contentDescription = "决策记录",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        DieValueText(value = value)
+                    }
+                } else {
+                    DieValueText(value = value)
+                }
+
+                Spacer(modifier = Modifier.height(if (landscape) 2.dp else 4.dp))
+
+                RollCounterRow(
+                    sessionRunning = sessionRunning,
+                    sessionRolled = sessionRolled,
+                    diceCount = diceCount,
+                    totalRolls = totalRolls,
+                    ruleSummary = settings.rule.shortSummary,
+                    onEditRule = { editorOpen = true },
+                )
 
                 // 终局那行「本次决策」：只在有规则、且这一轮完整摇完之后出现。
                 // 出现时把骰子舞台挤矮一点，骰子跟着缩 —— 沿用抽屉展开时那套自适应，不跳。
@@ -580,7 +603,7 @@ fun DiceScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(if (landscape) 6.dp else 12.dp))
 
                 // 底部这一格：三态（数量滑杆 / 摇动中留空 / 记录行）共用**同一格固定高度**，
                 // 只在格子内部交叉淡化。
@@ -591,79 +614,48 @@ fun DiceScreen(
                     promptVisible -> BottomSlot.Prompt
                     else -> BottomSlot.Selector
                 }
-                AnimatedContent(
-                    targetState = bottomSlot,
-                    modifier = Modifier.height(BOTTOM_SLOT_HEIGHT),
-                    transitionSpec = {
-                        fadeIn(tween(durationMillis = 200)) togetherWith fadeOut(tween(durationMillis = 200))
-                    },
-                    label = "bottomSlot",
-                ) { slot ->
-                    when (slot) {
-                        BottomSlot.Selector -> CountSelector(
-                            diceCount = diceCount,
-                            onDiceCountChange = { diceCount = it },
-                        )
-
-                        // 摇动中这一格留空，避免误触数量滑杆
-                        BottomSlot.Rolling -> Box(modifier = Modifier.fillMaxSize())
-
-                        BottomSlot.Prompt -> DecisionPrompt(
-                            value = decisionText,
-                            onValueChange = { decisionText = it },
-                            canSave = canSave,
-                            onSave = {
-                                onSaveDecision(
-                                    DecisionRecord(
-                                        timestampMillis = System.currentTimeMillis(),
-                                        results = roundResults,
-                                        decision = decision,
-                                        ruling = ruling,
-                                        // 规则的快照：以后改了规则，这条记录也说得清当时是怎么判的
-                                        ruleSummary = if (judgment == null) "" else settings.rule.summary,
-                                        subject = subject,
-                                    ),
-                                )
-                                closePrompt()
-                            },
-                            onIgnore = { closePrompt() },
-                        )
-                    }
+                // 保存这次决定的动作（记录怎么造在这一层，底部那格只管展示）
+                val saveDecision: () -> Unit = {
+                    onSaveDecision(
+                        DecisionRecord(
+                            timestampMillis = System.currentTimeMillis(),
+                            results = roundResults,
+                            decision = decision,
+                            ruling = ruling,
+                            // 规则的快照：以后改了规则，这条记录也说得清当时是怎么判的
+                            ruleSummary = if (judgment == null) "" else settings.rule.summary,
+                            subject = subject,
+                        ),
+                    )
+                    closePrompt()
                 }
+
+                // 横屏也是纵向排（右栏只有 340dp 宽，并排会挤）：槽在上、按钮在下
+                BottomSlotArea(
+                    slot = bottomSlot,
+                    diceCount = diceCount,
+                    onDiceCountChange = { diceCount = it },
+                    decisionText = decisionText,
+                    onDecisionTextChange = { decisionText = it },
+                    canSave = canSave,
+                    onSave = saveDecision,
+                    onIgnore = { closePrompt() },
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 记录行露出期间把摇骰按钮藏起来：它一按就开新一轮、会清空本轮结果，
-                // 而输入法正好挡在这一带，很容易误触；记完或忽略后它自己淡回来。
-                //
-                // ⚠️ 用「原地淡出 + 禁用」，不是把它从布局里拿掉：一拿掉，位置就让给了下面的
-                // 间距，记录行顺势往下掉、正好落进键盘区域（上一轮之所以没事，正是因为按钮还
-                // 占着位置、把记录行顶在键盘上方）。位置不动，就永远不会被键盘吃到。
-                Button(
+                RollButtonArea(
+                    sessionRunning = sessionRunning,
+                    promptVisible = promptVisible,
+                    diceCount = diceCount,
+                    buttonAlpha = rollButtonAlpha,
                     onClick = { if (sessionRunning) stopSession() else startSession() },
-                    enabled = !promptVisible,
-                    // 隐藏期间保持与正常态相同的配色，只靠透明度淡出。
-                    // 若用 M3 默认的禁用配色，会瞬间变成"禁用灰"——看起来就是"啪"地一下没了。
-                    colors = ButtonDefaults.buttonColors(
-                        disabledContainerColor = MaterialTheme.colorScheme.primary,
-                        disabledContentColor = MaterialTheme.colorScheme.onPrimary,
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(ROLL_BUTTON_HEIGHT)
-                        .graphicsLayer { alpha = rollButtonAlpha },
-                ) {
-                    Text(
-                        text = when {
-                            sessionRunning -> "停止"
-                            diceCount == 1 -> "摇一次"
-                            else -> "依次摇 $diceCount 次"
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                }
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(if (landscape) 8.dp else 24.dp))
+                }
             }
         }
     }
@@ -710,6 +702,189 @@ private fun CountSelector(
             style = MaterialTheme.typography.titleMedium,
             textAlign = TextAlign.End,
             modifier = Modifier.width(24.dp),
+        )
+    }
+}
+
+/**
+ * 骰子舞台：骰子本体 + 叠在上面的东西（托盘）。
+ *
+ * 横竖屏各用一次（横屏在左栏、竖屏在上半屏），所以 [tray] 是个槽位 ——
+ * 托盘的位置由调用方决定（横屏右上角、竖屏右下角）。
+ */
+@Composable
+private fun DiceStage(
+    dieSize: Dp,
+    rotX: () -> Float,
+    rotY: () -> Float,
+    rotZ: () -> Float,
+    tumbling: Boolean,
+    slideFraction: Float,
+    travelPx: Float,
+    onStageSize: (width: Int, height: Int) -> Unit,
+    tray: @Composable BoxScope.() -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.onSizeChanged { onStageSize(it.width, it.height) },
+        contentAlignment = Alignment.Center,
+    ) {
+        Dice3D(
+            rotXDegrees = rotX,
+            rotYDegrees = rotY,
+            rotZDegrees = rotZ,
+            rolling = tumbling,
+            modifier = Modifier
+                .size(dieSize)
+                .graphicsLayer {
+                    translationX = travelPx * slideFraction
+                    alpha = (1f - abs(slideFraction)).coerceIn(0f, 1f)
+                },
+        )
+
+        tray()
+    }
+}
+
+/** 「摇出 X 点」那一行。 */
+@Composable
+private fun DieValueText(value: Int, modifier: Modifier = Modifier) {
+    Text(
+        text = "摇出 $value 点",
+        style = MaterialTheme.typography.headlineSmall,
+        fontWeight = FontWeight.SemiBold,
+        modifier = modifier,
+    )
+}
+
+/**
+ * 「摇过多少次 · 规则摘要 ✎」那一行，同时也是判决规则的入口：点一下换规则。
+ * 摘要跟在次数后面，免得要点开才知道现在按什么判。
+ */
+@Composable
+private fun RollCounterRow(
+    sessionRunning: Boolean,
+    sessionRolled: Int,
+    diceCount: Int,
+    totalRolls: Int,
+    ruleSummary: String,
+    onEditRule: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(onClickLabel = "设置判决规则") { onEditRule() }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = when {
+                sessionRunning -> "第 ${(sessionRolled + 1).coerceAtMost(diceCount)} 个 / 共 $diceCount 个"
+                totalRolls == 0 -> "让骰子替你决定"
+                else -> "已经摇了 $totalRolls 次"
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (ruleSummary.isNotEmpty()) {
+            Text(
+                text = " · $ruleSummary",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(modifier = Modifier.width(4.dp))
+        Icon(
+            imageVector = Icons.Default.Edit,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+    }
+}
+
+/**
+ * 底部那一格：三态（数量滑杆 / 摇动中留空 / 记录行）共用**同一格固定高度**，
+ * 只在格子内部交叉淡化 —— 换态时上面的东西一律不动。
+ */
+@Composable
+private fun BottomSlotArea(
+    slot: BottomSlot,
+    diceCount: Int,
+    onDiceCountChange: (Int) -> Unit,
+    decisionText: String,
+    onDecisionTextChange: (String) -> Unit,
+    canSave: Boolean,
+    onSave: () -> Unit,
+    onIgnore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedContent(
+        targetState = slot,
+        modifier = modifier.height(BOTTOM_SLOT_HEIGHT),
+        transitionSpec = {
+            fadeIn(tween(durationMillis = 200)) togetherWith fadeOut(tween(durationMillis = 200))
+        },
+        label = "bottomSlot",
+    ) { current ->
+        when (current) {
+            BottomSlot.Selector -> CountSelector(
+                diceCount = diceCount,
+                onDiceCountChange = onDiceCountChange,
+            )
+
+            // 摇动中这一格留空，避免误触数量滑杆
+            BottomSlot.Rolling -> Box(modifier = Modifier.fillMaxSize())
+
+            BottomSlot.Prompt -> DecisionPrompt(
+                value = decisionText,
+                onValueChange = onDecisionTextChange,
+                canSave = canSave,
+                onSave = onSave,
+                onIgnore = onIgnore,
+            )
+        }
+    }
+}
+
+/**
+ * 摇骰按钮。记录行露出期间把它藏起来：它一按就开新一轮、会清空本轮结果，
+ * 而输入法正好挡在这一带，很容易误触；记完或忽略后它自己淡回来。
+ *
+ * ⚠️ 用「原地淡出 + 禁用」，不是把它从布局里拿掉：一拿掉，位置就让给了下面的间距，
+ * 记录行顺势往下掉、正好落进键盘区域。位置不动，就永远不会被键盘吃到。
+ */
+@Composable
+private fun RollButtonArea(
+    sessionRunning: Boolean,
+    promptVisible: Boolean,
+    diceCount: Int,
+    buttonAlpha: Float,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Button(
+        onClick = onClick,
+        enabled = !promptVisible,
+        // 隐藏期间保持与正常态相同的配色，只靠透明度淡出。
+        // 若用 M3 默认的禁用配色，会瞬间变成"禁用灰"——看起来就是"啪"地一下没了。
+        colors = ButtonDefaults.buttonColors(
+            disabledContainerColor = MaterialTheme.colorScheme.primary,
+            disabledContentColor = MaterialTheme.colorScheme.onPrimary,
+        ),
+        modifier = modifier
+            .height(ROLL_BUTTON_HEIGHT)
+            // ⚠️ 参数别叫 alpha：graphicsLayer 的接收者自己就有 alpha，同名会变成自我赋值
+            .graphicsLayer { alpha = buttonAlpha },
+    ) {
+        Text(
+            text = when {
+                sessionRunning -> "停止"
+                diceCount == 1 -> "摇一次"
+                else -> "依次摇 $diceCount 次"
+            },
+            style = MaterialTheme.typography.titleMedium,
         )
     }
 }
