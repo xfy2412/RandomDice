@@ -1,5 +1,6 @@
 package com.xfy.randomdice.data
 
+import com.xfy.randomdice.audio.SoundTimbre
 import com.xfy.randomdice.dice.JudgmentBasis
 import com.xfy.randomdice.dice.JudgmentPreset
 import com.xfy.randomdice.dice.JudgmentRule
@@ -21,12 +22,18 @@ data class DiceSettings(
     /** 累计摇过的**颗数**（不是轮数），跨启动累加。 */
     val totalRolls: Int = 0,
     val rule: JudgmentRule = JudgmentRule(),
+    /** 摇一摇手机就摇骰子（默认关闭，按钮在右下角托盘里）。 */
+    val shakeEnabled: Boolean = false,
+    /** 摇的时候震不震 —— 各机型马达差别很大，所以留个开关。 */
+    val vibrationEnabled: Boolean = true,
+    /** 摇的时候放哪种音效。 */
+    val timbre: SoundTimbre = SoundTimbre.Plastic,
 )
 
 /*
  * 存储格式（一行，制表符分隔）：
  *
- *     <累计颗数>\t<预设>\t<基准>\t<单数是否算第一个结果>\t<选项个数>\t<阈值>\t<点名点数>\t<至少几颗>
+ *     <累计颗数>\t<预设>\t<基准>\t<单数是否算第一个结果>\t<选项个数>\t<阈值>\t<点名点数>\t<至少几颗>\t<摇一摇开关>
  *
  * 后加的字段一律**往行尾追加**，所以老设置文件照样能读（缺的当默认值）。
  * 任何一段读不出来都退回该项的默认值 —— 设置文件坏了不该让 app 起不来。
@@ -50,6 +57,12 @@ fun encodeSettings(settings: DiceSettings): String = buildString {
     append(settings.rule.targetValue.coerceIn(MIN_TARGET_VALUE, MAX_TARGET_VALUE))
     append(SETTINGS_SEPARATOR)
     append(settings.rule.targetCount.coerceIn(MIN_TARGET_COUNT, MAX_TARGET_COUNT))
+    append(SETTINGS_SEPARATOR)
+    append(if (settings.shakeEnabled) "1" else "0")
+    append(SETTINGS_SEPARATOR)
+    append(if (settings.vibrationEnabled) "1" else "0")
+    append(SETTINGS_SEPARATOR)
+    append(settings.timbre.name)
     append('\n')
 }
 
@@ -70,6 +83,11 @@ fun decodeSettings(text: String): DiceSettings {
             targetValue = clampedInt(parts.getOrNull(6), MIN_TARGET_VALUE, MAX_TARGET_VALUE, defaults.targetValue),
             targetCount = clampedInt(parts.getOrNull(7), MIN_TARGET_COUNT, MAX_TARGET_COUNT, defaults.targetCount),
         ),
+        // 只有明写着 "1" 才算开 —— 缺字段、乱码一律算关（这是个会自己触发摇骰的开关，保守点）
+        shakeEnabled = parts.getOrNull(8)?.trim() == "1",
+        // 震动相反：老设置文件里没有这一段 → 保持默认的"开"，不改变既有行为
+        vibrationEnabled = parts.getOrNull(9)?.trim() != "0",
+        timbre = parseEnum(parts.getOrNull(10), DiceSettings().timbre),
     )
 }
 

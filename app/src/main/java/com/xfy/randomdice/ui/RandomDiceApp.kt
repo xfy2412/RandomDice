@@ -92,6 +92,21 @@ fun RandomDiceApp() {
                         settings.value = updated
                         settingsStore.save(updated)
                     },
+                    onShakeEnabledChange = { enabled ->
+                        val updated = settings.value.copy(shakeEnabled = enabled)
+                        settings.value = updated
+                        settingsStore.save(updated)
+                    },
+                    onVibrationEnabledChange = { enabled ->
+                        val updated = settings.value.copy(vibrationEnabled = enabled)
+                        settings.value = updated
+                        settingsStore.save(updated)
+                    },
+                    onTimbreChange = { timbre ->
+                        val updated = settings.value.copy(timbre = timbre)
+                        settings.value = updated
+                        settingsStore.save(updated)
+                    },
                     onOpenDecisions = { showDecisions = true },
                     onSaveDecision = { record ->
                         val updated = listOf(record) + records

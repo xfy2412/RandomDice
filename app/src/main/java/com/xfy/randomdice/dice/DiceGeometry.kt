@@ -123,6 +123,40 @@ fun upFaceValue(rotXDegrees: Float, rotYDegrees: Float, rotZDegrees: Float): Int
     return DIE_FACES.maxByOrNull { rotation.apply(it.normal).y }!!.value
 }
 
+/**
+ * 立方体的 8 个角（棱长 2、中心在原点）。
+ *
+ * 六个面各带 4 个角，但角是共用的（24 条记录其实只有 8 个点），
+ * 所以这里单独列一份 —— 「哪个角最低」要按**独立的角**来数。
+ */
+val DIE_CORNERS: List<Vec3> = listOf(
+    v(-1, -1, -1),
+    v(1, -1, -1),
+    v(1, -1, 1),
+    v(-1, -1, 1),
+    v(-1, 1, -1),
+    v(1, 1, -1),
+    v(1, 1, 1),
+    v(-1, 1, 1),
+)
+
+/**
+ * 当前姿态下**最低**的那个角（[DIE_CORNERS] 的下标）—— 也就是"离地最近"的角。
+ *
+ * 骰子是原地自转的（圆心不动），所以"角砸地"这件事在模型里就是
+ * **最低角换人**。阈值/并列时取下标小的那个，保证同一姿态结果稳定。
+ */
+fun lowestCornerIndex(rotXDegrees: Float, rotYDegrees: Float, rotZDegrees: Float): Int {
+    val rotation = DiceRotation(rotXDegrees, rotYDegrees, rotZDegrees)
+    return DIE_CORNERS.indices.minByOrNull { rotation.apply(DIE_CORNERS[it]).y }!!
+}
+
+/** 当前姿态下最低角离地的高度（立方体半棱长为 1，平放时是 -1）。 */
+fun lowestCornerHeight(rotXDegrees: Float, rotYDegrees: Float, rotZDegrees: Float): Float {
+    val rotation = DiceRotation(rotXDegrees, rotYDegrees, rotZDegrees)
+    return DIE_CORNERS.minOf { rotation.apply(it).y }
+}
+
 private val QUARTER_TURNS = listOf(0f, 90f, 180f, 270f)
 
 /** 所有能让 [value] 朝上的「90° 整数倍」姿态 (rotX, rotY, rotZ)。 */

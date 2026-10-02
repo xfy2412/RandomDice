@@ -1,6 +1,7 @@
 package com.xfy.randomdice.ui
 
 import android.content.res.Configuration
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
@@ -45,6 +46,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -59,15 +61,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.xfy.randomdice.audio.RollSoundPlayer
+import com.xfy.randomdice.audio.SoundTimbre
+import com.xfy.randomdice.audio.renderRollSound
 import com.xfy.randomdice.data.DecisionRecord
 import com.xfy.randomdice.data.DiceSettings
 import com.xfy.randomdice.dice.JudgmentRule
 import com.xfy.randomdice.dice.judge
+import com.xfy.randomdice.dice.rollImpacts
 import com.xfy.randomdice.dice.targetRotationFor
 import com.xfy.randomdice.ui.theme.RandomDiceTheme
 import kotlinx.coroutines.Job
@@ -92,6 +100,9 @@ private const val SLIDE_MS = 320
 
 /** 每个骰子摇完之后停留多久（同时也是进度条当前段填满所用的时间）。 */
 private val HOLD_AFTER_ROLL = 1.5.seconds
+
+/** 中途停下来时，把骰子转回「记录里那个点数」用多久。 */
+private const val SETTLE_BACK_MS = 260
 
 /** 同一时长换算成毫秒，给进度条的填充动画用（时长只有上面这一处真值）。 */
 private val HOLD_AFTER_ROLL_MS = HOLD_AFTER_ROLL.inWholeMilliseconds.toInt()
@@ -122,6 +133,9 @@ fun DiceScreen(
     settings: DiceSettings,
     onTotalRollsChange: (Int) -> Unit,
     onRuleChange: (JudgmentRule) -> Unit,
+    onShakeEnabledChange: (Boolean) -> Unit,
+    onVibrationEnabledChange: (Boolean) -> Unit,
+    onTimbreChange: (SoundTimbre) -> Unit,
     onOpenDecisions: () -> Unit,
     onSaveDecision: (DecisionRecord) -> Unit,
     modifier: Modifier = Modifier,
@@ -153,6 +167,19 @@ fun DiceScreen(
     var stageHeightPx by remember { mutableIntStateOf(0) }
 
     val density = LocalDensity.current
+    // 震动反馈走 View 的接口：Compose 那个 HapticFeedbackType 在 1.7 里只有"长按"，
+    // 而这里要的是"一轮摇完、该你说话了"那一下（CONTEXT_CLICK），用系统常量更贴切。
+    val view = LocalView.current
+    // 翻滚的震动走 Vibrator：能控幅度和节奏，才编得出"越转越慢越轻 + 落定一记重击"那条波形
+    val context = LocalContext.current
+    val rollVibrator = remember(context) { RollVibrator(context) }
+    // 音效：整条 PCM 一次写完再播（MODE_STATIC），和震动、画面共用同一张撞击表
+    val soundPlayer = remember { RollSoundPlayer() }
+    DisposableEffect(Unit) {
+        onDispose { soundPlayer.release() }
+    }
+    // 右下角工具托盘（⋮）的展开状态
+    var trayExpanded by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     // 骰子姿态（绕 Z → 绕 X → 绕 Y，单位度）。全 0 时朝上的是「1」，
     // 与 value 的初值一致 —— 这条不变量由 DiceGeometryTest 守着。
@@ -231,6 +258,24 @@ fun DiceScreen(
         )
 
         tumbling = true
+        // 一次翻滚的撞击时刻表：震动、音效、画面三者共用（哪个角成为最低点 = 撞了一下地）
+        val impacts = rollImpacts(
+            startX = rotationX.value,
+            startY = rotationY.value,
+            startZ = rotationZ.value,
+            endX = endX,
+            endY = endY,
+            endZ = endZ,
+            durationXMs = ROLL_DURATION_X_MS,
+            durationYMs = ROLL_DURATION_Y_MS,
+            durationZMs = ROLL_DURATION_Z_MS,
+        )
+        if (settings.vibrationEnabled) {
+            rollVibrator.playRoll(impacts, ROLL_DURATION_Z_MS)
+        }
+        if (settings.timbre != SoundTimbre.Off) {
+            soundPlayer.play(renderRollSound(impacts, settings.timbre, ROLL_DURATION_Z_MS))
+        }
         coroutineScope {
             launch {
                 rotationX.animateTo(endX, tween(ROLL_DURATION_X_MS, easing = FastOutSlowInEasing))
@@ -253,6 +298,7 @@ fun DiceScreen(
         totalRolls += 1
         onTotalRollsChange(totalRolls)
         roundResults = roundResults + result
+        // 落定那一下的重击已经在波形尾巴里了，这里不再单独震一记
         // sessionRolled（进度条「已完成段数」）不在这里 +1 —— 要等停留填满之后，见 startSession
     }
 
@@ -264,6 +310,8 @@ fun DiceScreen(
         roundResults = emptyList()
         roundTotal = count
         closePrompt() // 再摇一次就把记录行收起来
+        // 托盘也收起来：摇动期间整盘是禁用的，开着就再也点不回去了（会一直"卡"在那儿）
+        trayExpanded = false
         sessionJob = scope.launch {
             var completed = false
             try {
@@ -301,7 +349,11 @@ fun DiceScreen(
                 tumbling = false
                 sessionRunning = false
                 // 只有完整摇完一轮才提示记录；中途停止不弹（那不算一次完整的决定）
-                if (completed) promptVisible = true
+                if (completed) {
+                    promptVisible = true
+                    // 一轮摇完、该记录了：比单颗落定再重一记，听得出"到你了"
+                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                }
             }
         }
     }
@@ -309,11 +361,52 @@ fun DiceScreen(
     fun stopSession() {
         sessionJob?.cancel()
         currentFill = 0f
+        // 音效和震动立刻收住：PCM/波形都是整条交出去的，不主动停的话它们会自己播完
+        soundPlayer.release()
+        rollVibrator.cancel()
         // 万一停在滑出途中，把骰子带回中间
         scope.launch {
             slideFraction.animateTo(0f, tween(SLIDE_MS, easing = LinearOutSlowInEasing))
         }
+        // 翻滚被掐断时骰子会停在半路（画着一面、记录里却是另一面），把它转回 value 的姿态。
+        // 用 extraTurns = 0：只转到"离现在最近的那个能显示 value 的姿态"，不再多转整圈。
+        scope.launch {
+            val (endX, endY, endZ) = targetRotationFor(
+                value = value,
+                currentX = rotationX.value,
+                currentY = rotationY.value,
+                currentZ = rotationZ.value,
+                extraTurns = 0,
+            )
+            coroutineScope {
+                launch { rotationX.animateTo(endX, tween(SETTLE_BACK_MS, easing = FastOutSlowInEasing)) }
+                launch { rotationY.animateTo(endY, tween(SETTLE_BACK_MS, easing = FastOutSlowInEasing)) }
+                launch { rotationZ.animateTo(endZ, tween(SETTLE_BACK_MS, easing = FastOutSlowInEasing)) }
+            }
+            // 和 rollOne 一样把角度归一到 0..360，避免浮点无限增长
+            rotationX.snapTo(endX % 360f)
+            rotationY.snapTo(endY % 360f)
+            rotationZ.snapTo(endZ % 360f)
+        }
     }
+
+    // 现在允不允许"开新一轮"：摇动中不允、有待记录的决定也不允。
+    // 摇骰按钮和摇一摇共用这一条（按钮那时变「停止」还能按，摇一摇则干脆不响应）。
+    val shakeAvailable = shakeArmed(
+        shakeEnabled = true,
+        sessionRunning = sessionRunning,
+        promptVisible = promptVisible,
+    )
+
+    // 摇一摇：开关打开 + 上面的条件都满足时才去监听传感器（关掉就彻底注销，不费电）
+    ShakeToRollEffect(
+        enabled = shakeArmed(
+            shakeEnabled = settings.shakeEnabled,
+            sessionRunning = sessionRunning,
+            promptVisible = promptVisible,
+        ),
+        onShake = { startSession() },
+    )
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -386,6 +479,23 @@ fun DiceScreen(
                                 translationX = travel * slideFraction.value
                                 alpha = (1f - abs(slideFraction.value)).coerceIn(0f, 1f)
                             },
+                    )
+
+                    // 右下角工具托盘：⋮ 点一下向左展开（摇一摇 / 震动 / 音效）。
+                    // 摇动中、有待记录的决定时整盘不可点。
+                    ToolTray(
+                        expanded = trayExpanded,
+                        onExpandedChange = { trayExpanded = it },
+                        enabled = shakeAvailable,
+                        shakeEnabled = settings.shakeEnabled,
+                        onShakeEnabledChange = onShakeEnabledChange,
+                        vibrationEnabled = settings.vibrationEnabled,
+                        onVibrationEnabledChange = onVibrationEnabledChange,
+                        timbre = settings.timbre,
+                        onTimbreChange = onTimbreChange,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(4.dp),
                     )
                 }
 
@@ -612,6 +722,9 @@ private fun DiceScreenPreview() {
             settings = DiceSettings(),
             onTotalRollsChange = {},
             onRuleChange = {},
+            onShakeEnabledChange = {},
+            onVibrationEnabledChange = {},
+            onTimbreChange = {},
             onOpenDecisions = {},
             onSaveDecision = {},
         )
@@ -626,6 +739,9 @@ private fun DiceScreenDarkPreview() {
             settings = DiceSettings(),
             onTotalRollsChange = {},
             onRuleChange = {},
+            onShakeEnabledChange = {},
+            onVibrationEnabledChange = {},
+            onTimbreChange = {},
             onOpenDecisions = {},
             onSaveDecision = {},
         )

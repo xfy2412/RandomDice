@@ -1,5 +1,6 @@
 package com.xfy.randomdice
 
+import com.xfy.randomdice.audio.SoundTimbre
 import com.xfy.randomdice.data.DiceSettings
 import com.xfy.randomdice.data.decodeSettings
 import com.xfy.randomdice.data.encodeSettings
@@ -102,6 +103,41 @@ class DiceSettingsCodecTest {
     fun counterSurvivesEvenIfTheRulePartIsBroken() {
         // 「摇过的次数」是最不该丢的 —— 规则那段烂了也得把数字读回来
         assertEquals(42, decodeSettings("42\t乱码\t乱码\t乱码\t乱码").totalRolls)
+    }
+
+    @Test
+    fun vibrationAndTimbreRoundTrip() {
+        val settings = DiceSettings(
+            totalRolls = 1,
+            vibrationEnabled = false,
+            timbre = SoundTimbre.Ceramic,
+        )
+        assertEquals(settings, decodeSettings(encodeSettings(settings)))
+    }
+
+    @Test
+    fun olderSettingsKeepVibrationOnAndDefaultToPlastic() {
+        // 老文件（只有 9 段）→ 震动保持默认"开"（不改变既有行为）、音色默认塑料
+        val old = decodeSettings("25\tBestOf\tSum\t1\t3\t9\t6\t1\t1")
+        assertEquals(true, old.vibrationEnabled)
+        assertEquals(SoundTimbre.Plastic, old.timbre)
+        // 乱码的音色名也退回默认
+        assertEquals(SoundTimbre.Plastic, decodeSettings("25\tBestOf\tSum\t1\t3\t9\t6\t1\t1\t1\t乱码").timbre)
+    }
+
+    @Test
+    fun shakeSwitchRoundTrips() {
+        val on = DiceSettings(totalRolls = 3, shakeEnabled = true)
+        assertEquals(on, decodeSettings(encodeSettings(on)))
+        assertEquals(false, decodeSettings(encodeSettings(DiceSettings())).shakeEnabled)
+    }
+
+    @Test
+    fun shakeSwitchDefaultsToOffWhenMissing() {
+        // 老设置文件没有这一段 → 关。这是个会自己触发摇骰的开关，缺字段就必须保守。
+        assertEquals(false, decodeSettings("25\tBestOf\tSum\t1\t3\t9\t6\t1").shakeEnabled)
+        assertEquals(false, decodeSettings("25\tBestOf\tSum\t1\t3\t9\t6\t1\t乱码").shakeEnabled)
+        assertEquals(true, decodeSettings("25\tBestOf\tSum\t1\t3\t9\t6\t1\t1").shakeEnabled)
     }
 
     @Test
