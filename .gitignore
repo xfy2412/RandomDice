@@ -13,3 +13,19 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# 打包产物：AS 的「Generate Signed Bundle / APK」默认落在 app/release/
+# （app/build/ 由 app/.gitignore 里的 /build 管着）
+app/release/
+*.apk
+*.aab
+*.ap_
+output-metadata.json
+
+# Kotlin 2.x 的会话目录
+.kotlin/
+
+# 签名材料：绝不进仓库（密钥虽然放在仓库外，也防一手手滑）
+keystore.properties
+*.jks
+*.keystore
